@@ -6,62 +6,8 @@ from typing import Union
 from model import Transformer
 from config import config
 from dataset import Multi30kDe2En
-from torchtext.data.metrics import bleu_score
 from torch.utils.data import DataLoader
-from torch.nn.utils.rnn import pad_sequence
-from tqdm import tqdm
-
-def translate_sentences(sentences: Union[list, str], model: Transformer, src_vocab: Vocab, trg_vocab: Vocab, max_len=50,
-                       device='cpu'):
-    model.eval()
-    if isinstance(sentences[0], str):
-        de_tokenizer = get_tokenizer('spacy', language='de_core_news_sm')
-        tokens_batch = [de_tokenizer(sent.lower()) for sent in sentences]
-        # tokens_batch = de_tokenizer(sentence.lower())
-    else:
-        # tokens = [token.lower() for token in sentence]
-        tokens_batch = [[token.lower() for token in sent] for sent in sentences]
-
-    tokens_batch = [['<bos>'] + tokens + ['<eos>'] for tokens in tokens_batch]  # add bos and eos tokens to the sides of the sentence
-    src_indices = []
-    for tokens in tokens_batch:
-        indices = [src_vocab[token] for token in tokens]
-        src_indices.append(torch.LongTensor(indices))
-
-    # src_tensor = pad_sequence(src_indices, batch_first=True, padding_value=src_vocab['<pad>']).to(device)
-    src_tensor = torch.stack(src_indices)
-    src_mask = model.src_mask(src_tensor).to(device)
-
-    with torch.no_grad():
-        src_encoded = model.encoder(src_tensor, src_mask)
-    
-    batch_size = src_tensor.size(0)
-    trg_indices = torch.full((batch_size, 1), trg_vocab['bos'], dtype=torch.long, device=device) # an empty target sentence to be filled in the following loop
-    finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
-    
-    for i in range(max_len):
-        trg_mask = model.trg_mask(trg_indices).to(device)
-
-        with torch.no_grad():
-            output = model.decoder(trg_indices, src_encoded, trg_mask, src_mask)
-        next_tokens = output.argmax(-1)[:, -1]
-        trg_indices = torch.cat([trg_indices, next_tokens.unsqueeze(1)], dim=1)
-        
-        eos_tokens = (next_tokens == trg_vocab['<eos>'])
-        finished |= eos_tokens
-        if finished.all():
-            break
-        output_tokens = []
-        for seq in trg_indices:
-            tokens = []
-            for idx in seq:
-                token = trg_vocab.lookup_token(idx.item())
-                tokens.append(token)
-                if token == '<eos>':
-                    break
-            output_tokens.append(tokens)
-
-    return output_tokens
+from torchtext.data.metrics import bleu_score
 
 def translate_sentence(sentence: Union[list, str], model: Transformer, src_vocab: Vocab, trg_vocab: Vocab, max_len=50,
                        device='cpu'):
@@ -74,6 +20,7 @@ def translate_sentence(sentence: Union[list, str], model: Transformer, src_vocab
 
     tokens = ['<bos>'] + tokens + ['<eos>']  # add bos and eos tokens to the sides of the sentence
     src_indices = [src_vocab[token] for token in tokens]
+
     src_tensor = torch.LongTensor(src_indices).unsqueeze(0).to(device)
     src_mask = model.src_mask(src_tensor).to(device)
 
@@ -88,7 +35,7 @@ def translate_sentence(sentence: Union[list, str], model: Transformer, src_vocab
 
         with torch.no_grad():
             output = model.decoder(trg_tensor, src_encoded, trg_mask, src_mask)
-        
+
         pred_token = output.argmax(2)[:, -1].item()
         trg_indexes.append(pred_token)
 
@@ -98,47 +45,32 @@ def translate_sentence(sentence: Union[list, str], model: Transformer, src_vocab
     output_tokens = trg_vocab.lookup_tokens(trg_indexes)
 
     return output_tokens
-     
-def fix_punctuation(tokens):
-    cleaned = []
-    for token in tokens:
-        if token in [".", ",", "!"] and cleaned:
-            cleaned[-1] += token  # Attach punctuation to previous token
-        else:
-            cleaned.append(token)
-    return cleaned  
-    
-def test(model, dataloader, trg_vocab, max_length=50, device='cuda'):
-    model.eval()
-    hypotheses = []
-    references = []
-    with tqdm(dataloader, unit="batch", desc=f'Evaluating... ',
-                bar_format='{desc:<16}{percentage:3.0f}%|{bar:70}{r_bar}', ascii=" #") as iterator:
-        with torch.no_grad():
-            for src, trg in iterator:
-                src, trg = src.to(device), trg.to(device)
-                # src_tensor = torch.LongTensor(src_indices).unsqueeze(0).to(device)
-                src_mask = model.src_mask(src).to(device)
-                src_encoded = model.encoder(src, src_mask)
-                trg_indexes = [trg_vocab['<bos>']] * dataloader.batch_size # an empty target sentence to be filled in the following loop
-                print("trg", trg_indexes[0], trg_indexes[1])
-                for i in range(max_length):
-                    trg = torch.LongTensor(trg_indexes).to(device)
-                    trg_mask = model.trg_mask(trg).to(device)
-                    output = model.decoder(trg, src_encoded, trg_mask, src_mask)
-                    pred_token = output.argmax(dim=-1)
-                    print(pred_token)
-                # for i in range(preds.size(0)):
-                #     pred_tokens = preds[i].tolist()
-                #     target_tokens = trg[i, 1:].tolist()
-                #     pred_str = trg_vocab.lookup_tokens(pred_tokens)
-                #     target_str = trg_vocab.lookup_tokens(target_tokens)
 
-                #     hypotheses.append(pred_str)
-                #     references.append([target_str])
-    bleu_scores = bleu_score(hypotheses, references)
-    print(bleu_scores)
-      
+def translate_indices(indices, model, trg_vocab, max_len=50, device="cpu"):
+        model.eval()
+        src_mask = model.src_mask(indices).to(device)
+        with torch.no_grad():
+            src_encoded = model.encoder(indices, src_mask)
+        
+        trg_indexes = [trg_vocab['<bos>']]
+        for i in range(max_len):
+            trg_tensor = torch.LongTensor(trg_indexes).unsqueeze(0).to(device)
+            trg_mask = model.trg_mask(trg_tensor).to(device)
+            
+            with torch.no_grad():
+                output = model.decoder(trg_tensor, src_encoded, trg_mask, src_mask)
+            
+            pred_token = output.argmax(2)[:, -1].item()
+            trg_indexes.append(pred_token)
+            
+            if pred_token == trg_vocab['<eos>']:
+                break
+        
+        output_tokens = trg_vocab.lookup_tokens(trg_indexes)
+        output_tokens = [output_token for output_token in output_tokens if output_token not in {'<bos>', '<eos>', '<unk>'}]
+        # output_tokens = f'Translation: {" ".join(output_tokens)}'.replace('<bos>', '').replace('<eos>', '').replace('<unk>', '')
+        return output_tokens
+
 if __name__ == '__main__':
     dataset = Multi30kDe2En('train')
     de_vocab = dataset.de_vocab
@@ -160,7 +92,7 @@ if __name__ == '__main__':
     trg_pad_idx = config['trg_pad_idx']
     lr = config['lr']
     clip = config['clip']
-    weights_path = 'weights/50.pt'
+    weights_path = 'weights/40.pt'
 
     model = Transformer(src_vocab_size,
                         trg_vocab_size,
@@ -174,47 +106,42 @@ if __name__ == '__main__':
                         dropout,
                         device)
     model.to(device)
-    state_dict = torch.load(weights_path, map_location=device)
+    model.load_state_dict(torch.load(weights_path, map_location=device))
 
-    # Remove 'module.' prefix from keys
-    # state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    sentence = 'Eine Gruppe von Menschen steht vor einem Iglu'
 
-    # # Load the modified state_dict into the model
-    # model.load_state_dict(state_dict)
-    # model.load_state_dict(torch.load(weights_path, map_location=device))
-
-    sentences = ['Eine Gruppe von Menschen steht vor einem Iglu', 
-                'In der Türkei hat die Polizei den Istanbuler Bürgermeister Ekrem İmamoğlu festgenommen.']
-    outputs = translate_sentence(sentences[0], model, de_vocab, en_vocab, device=device)
-    # print(f'Translation: {" ".join(outputs)}'.replace('<bos>', '').replace('<eos>', ''))
-    # print('---------------------')
-    # outputs = translate_sentences(sentences, model, de_vocab, en_vocab, device=device)
-    # for output in outputs:
-    #     print(f'Translation: {" ".join(output)}'.replace('<bos>', '').replace('<eos>', ''))
+    output = translate_sentence(sentence, model, de_vocab, en_vocab, device=device)
+    print(f'Translation: {" ".join(output)}'.replace('<bos>', '').replace('<eos', ''))
     
-    dataset_test = Multi30kDe2En('test', istoken=False)
+    
+    dataset_test = Multi30kDe2En('test', istoken=True)
     dataloader = DataLoader(dataset_test, batch_size=1)
-    # test(model, dataloader, en_vocab, device=device)
-    bleu_ = []
+    
+    output_str_list = []
     candidates = []
-    targets = []
+    references = []
     for src, trg in dataloader:
         # print(src, trg)
-        print(src)
-        src, trg = src.to(device), trg.to(device)
-        output = translate_sentence(src[0], model, de_vocab, en_vocab, device=device)
-        # print(f'Translation: {" ".join(output)}'.replace('<bos>', '').replace('<eos>', ''))
-        try:
-            output.remove('<bos>')
-            output.remove('<eos>')
-        except:
-            None
-        candidates.append(fix_punctuation(output))
-        targets.append([trg[0].split()])
-    print(bleu_score(candidates, targets))
-    # print(bleu_ / len(bleu_))
-    # avg_bleu = test(model, dataloader, en_vocab, device)
-    # print(avg_bleu)
+        src = src.to(device)
+        output = translate_indices(src, model, en_vocab, device=device)
+        output_str = f'Translation: {" ".join(output)}'.replace('<bos>', '').replace('<eos>', '').replace('<unk>', '')
+        reference = en_vocab.lookup_tokens(trg[0].numpy())
+        output_str_list.append(output_str)
+        candidates.append(output)
+        references.append([reference])
+        
     
- 
-
+    bleu_score_measure = bleu_score(candidates, references)
+    print(bleu_score_measure)
+    
+    with open("translated_output.txt", "w", encoding="utf-8") as f:
+        f.write(f"bleu score: {bleu_score_measure}\n")
+        for text in output_str_list:
+            f.write(text + "\n")
+    f.close()
+    
+    print("Translated text saved")
+    
+        
+        
+        # print(f'Translation: {" ".join(output)}'.replace('<bos>', '').replace('<eos>', ''))
