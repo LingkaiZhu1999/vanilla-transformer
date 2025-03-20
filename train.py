@@ -38,6 +38,7 @@ class Trainer:
         self.trg_pad_idx = config['trg_pad_idx']
         self.lr = config['lr']
         self.clip = config['clip']
+        self.warmup_steps = config['warmup']
         # Model
         self.model = Transformer(self.src_vocab_size,
                                  self.trg_vocab_size,
@@ -54,9 +55,15 @@ class Trainer:
         self.model.to(self.device)
 
         # Optimizer
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=5e-4)
+        
+        if self.warmup_steps!=None:
+            self.scheduler = torch.optim.lr_scheduler.LambdaLR(
+                self.optimizer,
+                lr_lambda=lambda step: min((step+1)**-0.5, (step+1) * (self.warmup_steps**-1.5))
+            )
         # Loss Function
-        self.criterion = nn.CrossEntropyLoss(ignore_index=self.trg_pad_idx)
+        self.criterion = nn.CrossEntropyLoss(ignore_index=self.trg_pad_idx, label_smoothing=0.1)
         self.criterion.to(self.device)
 
         # Metrics
@@ -88,6 +95,8 @@ class Trainer:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip)
                 self.optimizer.step()
                 self.optimizer.zero_grad()
+                if self.warmup_steps!=None:
+                    self.scheduler.step()
 
                 self.loss_tracker.update(loss.item())
                 avg_loss = self.loss_tracker.avg
@@ -113,7 +122,7 @@ class Trainer:
                     iterator.set_postfix(loss=avg_loss)
         return avg_loss
 
-    def fit(self, train_loader, valid_loader, epochs):
+    def fit(self, train_loader, valid_loader, epochs, trg_vocab):
         for epoch in range(1, epochs + 1):
             print()
             train_loss = self.train(train_loader, epoch, epochs)
@@ -122,12 +131,41 @@ class Trainer:
             # tensorboard
             self.writer.add_scalar('train_loss', train_loss, epoch)
             self.writer.add_scalar('val_loss', val_loss, epoch)
-
+            
+            val_src, val_trg = next(iter(valid_loader))
+            pred_txt = self.translate_indices(val_src[0].unsqueeze(0).to(self.device), trg_vocab)
+            trg_txt = f' Target: {" ".join(trg_vocab.lookup_tokens(val_trg[0].numpy()))}'.replace('<bos>', '').replace('<eos>', '').replace('<pad>', '').replace('<unk>', '')
+            
+            self.writer.add_text("val_text", pred_txt+trg_txt, epoch)
             should_save_weights = lambda x: not bool(x % self.config['save_interval'])
             if should_save_weights(epoch):
                 save_path = os.path.join(self.config['weights_dir'], f'{epoch}.pt')
                 torch.save(self.model.state_dict(), save_path)
                 print(f'Saved Model at {save_path}')
+    
+    def translate_indices(self, indices, trg_vocab, max_len=50):
+        self.model.eval()
+        src_mask = self.model.src_mask(indices).to(self.device)
+        with torch.no_grad():
+            src_encoded = self.model.encoder(indices, src_mask)
+        
+        trg_indexes = [trg_vocab['<bos>']]
+        for i in range(max_len):
+            trg_tensor = torch.LongTensor(trg_indexes).unsqueeze(0).to(self.device)
+            trg_mask = self.model.trg_mask(trg_tensor).to(self.device)
+            
+            with torch.no_grad():
+                output = self.model.decoder(trg_tensor, src_encoded, trg_mask, src_mask)
+            
+            pred_token = output.argmax(2)[:, -1].item()
+            trg_indexes.append(pred_token)
+            
+            if pred_token == trg_vocab['<eos>']:
+                break
+            
+        output_tokens = trg_vocab.lookup_tokens(trg_indexes)
+        output_tokens = f'Translation: {" ".join(output_tokens)}'.replace('<bos>', '').replace('<eos>', '')
+        return output_tokens
 
 
 if __name__ == '__main__':
@@ -136,6 +174,9 @@ if __name__ == '__main__':
     train_dataset = Multi30kDe2En('train')
     valid_dataset = Multi30kDe2En('valid')
 
+    de_vocab = train_dataset.de_vocab
+    en_vocab = train_dataset.en_vocab
+    
     train_loader = DataLoader(train_dataset,
                               batch_size=batch_size,
                               shuffle=True,
@@ -150,4 +191,4 @@ if __name__ == '__main__':
     config['src_pad_idx'] = Multi30kDe2En.PAD_IDX
     config['trg_pad_idx'] = Multi30kDe2En.PAD_IDX
     trainer = Trainer(config)
-    trainer.fit(train_loader, valid_loader, config['epochs'])
+    trainer.fit(train_loader, valid_loader, config['epochs'], en_vocab)
