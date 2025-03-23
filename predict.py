@@ -4,7 +4,7 @@ from torchtext.vocab import Vocab
 from torchtext.data.utils import get_tokenizer
 from typing import Union
 from model import Transformer
-from config import config
+from config_base import config
 from dataset import Multi30kDe2En
 from torch.utils.data import DataLoader
 from torchtext.data.metrics import bleu_score
@@ -92,7 +92,7 @@ if __name__ == '__main__':
     trg_pad_idx = config['trg_pad_idx']
     lr = config['lr']
     clip = config['clip']
-    weights_path = 'weights/40.pt'
+    weights_path = 'weights_base/2650.pt'
 
     model = Transformer(src_vocab_size,
                         trg_vocab_size,
@@ -134,7 +134,7 @@ if __name__ == '__main__':
     bleu_score_measure = bleu_score(candidates, references)
     print(bleu_score_measure)
     
-    with open("translated_output.txt", "w", encoding="utf-8") as f:
+    with open("translated_output_base.txt", "w", encoding="utf-8") as f:
         f.write(f"bleu score: {bleu_score_measure}\n")
         for text in output_str_list:
             f.write(text + "\n")
